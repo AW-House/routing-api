@@ -327,6 +327,8 @@ const jsonRpcProviders = {
   WEB3_RPC_43114: process.env.WEB3_RPC_43114!,
   WEB3_RPC_56: process.env.WEB3_RPC_56!,
   WEB3_RPC_8453: process.env.WEB3_RPC_8453!,
+  WEB3_RPC_17069: process.env.JSON_RPC_PROVIDER_17069!,
+  WEB3_RPC_690: process.env.JSON_RPC_PROVIDER_690!,
   // The followings are for RPC Gateway
   // Optimism
   INFURA_10: process.env.INFURA_10!,
@@ -366,6 +368,7 @@ const jsonRpcProviders = {
   // Blast
   QUICKNODE_81457: process.env.QUICKNODE_81457!,
   INFURA_81457: process.env.INFURA_81457!,
+
 }
 
 // Local dev stack

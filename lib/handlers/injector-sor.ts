@@ -80,6 +80,8 @@ export const SUPPORTED_CHAINS: ChainId[] = [
   ChainId.AVALANCHE,
   ChainId.BASE,
   ChainId.BLAST,
+  ChainId.REDSTONE_GARNET,
+  ChainId.REDSTONE,
 ]
 const DEFAULT_TOKEN_LIST = 'https://gateway.ipfs.io/ipns/tokens.uniswap.org'
 

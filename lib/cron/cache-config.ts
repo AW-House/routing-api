@@ -46,7 +46,20 @@ export const chainProtocols = [
     timeout: 90000,
     provider: new V3SubgraphProvider(ChainId.BASE, 3, 90000),
   },
-  // Currently there is no working V3 subgraph for Optimism so we use a static provider.
+  // Currently there is no working V3 subgraph for Optimism & Redstone so we use a static provider.
+  // {
+  //   protocol: Protocol.V3,
+  //   chainId: ChainId.REDSTONE,
+  //   timeout: 90000,
+  //   provider: new V3SubgraphProvider(ChainId.REDSTONE, 3, 90000),
+  // },
+  // {
+  //   protocol: Protocol.V3,
+  //   chainId: ChainId.REDSTONE_GARNET,
+  //   timeout: 90000,
+  //   provider: new V3SubgraphProvider(ChainId.REDSTONE_GARNET, 3, 90000),
+  // },
+
   // V2.
 
   {
