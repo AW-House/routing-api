@@ -33,9 +33,9 @@ export class GlobalRpcProviders {
       for (let i = 0; i < chainConfig.providerUrls!.length; i++) {
         const urlEnvVar = chainConfig.providerUrls[i]
         if (process.env[urlEnvVar] === undefined) {
-          throw new Error(`Environmental variable ${urlEnvVar} isn't defined!`)
+          // throw new Error(`Environmental variable ${urlEnvVar} isn't defined!`)
         }
-        chainConfig.providerUrls[i] = generateProviderUrl(urlEnvVar, process.env[urlEnvVar]!)
+        chainConfig.providerUrls[i] = urlEnvVar ? generateProviderUrl(urlEnvVar, process.env[urlEnvVar]!) : 'https://rpc.placeholder.io'
       }
     }
     return prodConfig
