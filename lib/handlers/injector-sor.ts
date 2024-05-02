@@ -35,8 +35,8 @@ import {
   TokenValidatorProvider,
   ITokenPropertiesProvider,
   IOnChainQuoteProvider,
+  MIXED_ROUTE_QUOTER_V1_ADDRESSES,
   NEW_QUOTER_V2_ADDRESSES,
-  QUOTER_V2_ADDRESSES,
 } from '@uniswap/smart-order-router'
 import { TokenList } from '@uniswap/token-lists'
 import { default as bunyan, default as Logger } from 'bunyan'
@@ -62,17 +62,17 @@ import {
   BATCH_PARAMS,
   BLOCK_NUMBER_CONFIGS,
   GAS_ERROR_FAILURE_OVERRIDES,
+  NEW_MIXED_ROUTE_QUOTER_V1_ADDRESSES,
   RETRY_OPTIONS,
   SUCCESS_RATE_FAILURE_OVERRIDES,
 } from '../util/onChainQuoteProviderConfigs'
+import { v4 } from 'uuid/index'
 
 export const SUPPORTED_CHAINS: ChainId[] = [
   ChainId.MAINNET,
   ChainId.OPTIMISM,
   ChainId.ARBITRUM_ONE,
-  ChainId.ARBITRUM_GOERLI,
   ChainId.POLYGON,
-  ChainId.POLYGON_MUMBAI,
   ChainId.SEPOLIA,
   ChainId.CELO,
   ChainId.CELO_ALFAJORES,
@@ -122,6 +122,7 @@ export interface ContainerInjected {
   dependencies: {
     [chainId in ChainId]?: ContainerDependencies
   }
+  activityId?: string
 }
 
 export abstract class InjectorSOR<Router, QueryParams> extends Injector<
@@ -131,10 +132,12 @@ export abstract class InjectorSOR<Router, QueryParams> extends Injector<
   QueryParams
 > {
   public async buildContainerInjected(): Promise<ContainerInjected> {
+    const activityId = v4()
     const log: Logger = bunyan.createLogger({
       name: this.injectorName,
       serializers: bunyan.stdSerializers,
       level: bunyan.INFO,
+      activityId: activityId,
     })
     setGlobalLogger(log)
 
@@ -286,6 +289,14 @@ export abstract class InjectorSOR<Router, QueryParams> extends Injector<
             case ChainId.SEPOLIA:
             case ChainId.POLYGON_MUMBAI:
             case ChainId.MAINNET:
+            case ChainId.POLYGON:
+            case ChainId.BASE:
+            case ChainId.ARBITRUM_ONE:
+            case ChainId.OPTIMISM:
+            case ChainId.BNB:
+            case ChainId.CELO:
+            case ChainId.AVALANCHE:
+            case ChainId.BLAST:
               const currentQuoteProvider = new OnChainQuoteProvider(
                 chainId,
                 provider,
@@ -295,8 +306,9 @@ export abstract class InjectorSOR<Router, QueryParams> extends Injector<
                 GAS_ERROR_FAILURE_OVERRIDES[chainId],
                 SUCCESS_RATE_FAILURE_OVERRIDES[chainId],
                 BLOCK_NUMBER_CONFIGS[chainId],
-                QUOTER_V2_ADDRESSES[chainId],
-                `ChainId_${chainId}_Quoter`
+                // We will only enable shadow sample mixed quoter on Base
+                (useMixedRouteQuoter: boolean) =>
+                  useMixedRouteQuoter ? NEW_MIXED_ROUTE_QUOTER_V1_ADDRESSES[chainId] : NEW_QUOTER_V2_ADDRESSES[chainId]
               )
               const targetQuoteProvider = new OnChainQuoteProvider(
                 chainId,
@@ -307,81 +319,16 @@ export abstract class InjectorSOR<Router, QueryParams> extends Injector<
                 GAS_ERROR_FAILURE_OVERRIDES[chainId],
                 SUCCESS_RATE_FAILURE_OVERRIDES[chainId],
                 BLOCK_NUMBER_CONFIGS[chainId],
-                NEW_QUOTER_V2_ADDRESSES[chainId],
-                `ChainId_${chainId}_Shadow_Quoter`
+                (useMixedRouteQuoter: boolean) =>
+                  useMixedRouteQuoter ? MIXED_ROUTE_QUOTER_V1_ADDRESSES[chainId] : NEW_QUOTER_V2_ADDRESSES[chainId],
+                (chainId: ChainId, useMixedRouteQuoter: boolean) =>
+                  useMixedRouteQuoter ? `ChainId_${chainId}_ShadowMixedQuoter` : `ChainId_${chainId}_ShadowV3Quoter`
               )
               quoteProvider = new TrafficSwitchOnChainQuoteProvider({
                 currentQuoteProvider: currentQuoteProvider,
                 targetQuoteProvider: targetQuoteProvider,
                 chainId: chainId,
               })
-              break
-            case ChainId.BASE:
-            case ChainId.OPTIMISM:
-              quoteProvider = new OnChainQuoteProvider(
-                chainId,
-                provider,
-                multicall2Provider,
-                {
-                  retries: 2,
-                  minTimeout: 100,
-                  maxTimeout: 1000,
-                },
-                {
-                  multicallChunk: 110,
-                  gasLimitPerCall: 1_200_000,
-                  quoteMinSuccessRate: 0.1,
-                },
-                {
-                  gasLimitOverride: 3_000_000,
-                  multicallChunk: 45,
-                },
-                {
-                  gasLimitOverride: 3_000_000,
-                  multicallChunk: 45,
-                },
-                {
-                  baseBlockOffset: -25,
-                  rollback: {
-                    enabled: true,
-                    attemptsBeforeRollback: 1,
-                    rollbackBlockOffset: -20,
-                  },
-                }
-              )
-              break
-            case ChainId.ARBITRUM_ONE:
-              quoteProvider = new OnChainQuoteProvider(
-                chainId,
-                provider,
-                multicall2Provider,
-                {
-                  retries: 2,
-                  minTimeout: 100,
-                  maxTimeout: 1000,
-                },
-                {
-                  multicallChunk: 15,
-                  gasLimitPerCall: 15_000_000,
-                  quoteMinSuccessRate: 0.15,
-                },
-                {
-                  gasLimitOverride: 30_000_000,
-                  multicallChunk: 8,
-                },
-                {
-                  gasLimitOverride: 30_000_000,
-                  multicallChunk: 8,
-                },
-                {
-                  baseBlockOffset: 0,
-                  rollback: {
-                    enabled: true,
-                    attemptsBeforeRollback: 1,
-                    rollbackBlockOffset: -10,
-                  },
-                }
-              )
               break
           }
 
@@ -477,6 +424,7 @@ export abstract class InjectorSOR<Router, QueryParams> extends Injector<
 
       return {
         dependencies: dependenciesByChain,
+        activityId: activityId,
       }
     } catch (err) {
       log.fatal({ err }, `Fatal: Failed to build container`)

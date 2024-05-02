@@ -19,6 +19,7 @@ import { RoutingDatabaseStack } from './routing-database-stack'
 import { RpcGatewayDashboardStack } from './rpc-gateway-dashboard'
 import { REQUEST_SOURCES } from '../../lib/util/requestSources'
 import { TESTNETS } from '../../lib/util/testNets'
+import { RpcGatewayFallbackStack } from './rpc-gateway-fallback-stack'
 
 export const CHAINS_NOT_MONITORED: ChainId[] = TESTNETS
 export const REQUEST_SOURCES_NOT_MONITORED = ['unknown']
@@ -91,7 +92,7 @@ export class RoutingAPIStack extends cdk.Stack {
       cachedV3PoolsDynamoDb,
       cachedV2PairsDynamoDb,
       tokenPropertiesCachingDynamoDb,
-      rpcProviderStateDynamoDb,
+      rpcProviderHealthStateDynamoDb,
     } = new RoutingDatabaseStack(this, 'RoutingDatabaseStack', {})
 
     const { routingLambda, routingLambdaAlias } = new RoutingLambdaStack(this, 'RoutingLambdaStack', {
@@ -113,7 +114,7 @@ export class RoutingAPIStack extends cdk.Stack {
       cachedV3PoolsDynamoDb,
       cachedV2PairsDynamoDb,
       tokenPropertiesCachingDynamoDb,
-      rpcProviderStateDynamoDb,
+      rpcProviderHealthStateDynamoDb,
       unicornSecret,
     })
 
@@ -230,6 +231,7 @@ export class RoutingAPIStack extends cdk.Stack {
     })
 
     new RpcGatewayDashboardStack(this, 'RpcGatewayDashboardStack')
+    new RpcGatewayFallbackStack(this, 'RpcGatewayFallbackStack', { rpcProviderHealthStateDynamoDb })
 
     const lambdaIntegration = new aws_apigateway.LambdaIntegration(routingLambdaAlias)
 
