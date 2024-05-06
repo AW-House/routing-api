@@ -182,6 +182,8 @@ export const NEW_QUOTER_DEPLOY_BLOCK: { [chainId in ChainId]: number } = {
   [ChainId.ZORA_SEPOLIA]: -1,
   [ChainId.ROOTSTOCK]: -1,
   [ChainId.BLAST]: 2370179,
+  [ChainId.REDSTONE_GARNET]: -1,
+  [ChainId.REDSTONE]: -1
 }
 
 // 0 threshold means it's not deployed yet
@@ -208,7 +210,9 @@ export const LIKELY_OUT_OF_GAS_THRESHOLD: { [chainId in ChainId]: number } = {
   [ChainId.ZORA]: 0,
   [ChainId.ZORA_SEPOLIA]: 0,
   [ChainId.ROOTSTOCK]: 0,
-  [ChainId.BLAST]: 17540 * 2, // 17540 is the single tick.cross cost on blast. We multiply by 2 to be safe
+  [ChainId.BLAST]: 17540 * 2,
+  [ChainId.REDSTONE_GARNET]: 0,
+  [ChainId.REDSTONE]: 0
 }
 
 // TODO: Move this new addresses to SOR
