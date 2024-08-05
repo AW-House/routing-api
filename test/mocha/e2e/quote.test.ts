@@ -11,6 +11,7 @@ import {
   NATIVE_CURRENCY,
   parseAmount,
   SWAP_ROUTER_02_ADDRESSES,
+  USDB_BLAST,
   USDC_BNB,
   USDC_MAINNET,
   USDC_NATIVE_ARBITRUM,
@@ -75,6 +76,24 @@ const BULLET_WHT_TAX = new Token(
   8,
   'BULLET',
   'Bullet Game Betting Token',
+  false,
+  BigNumber.from(500),
+  BigNumber.from(500)
+)
+export const DFNDR = new Token(
+  ChainId.MAINNET,
+  '0x3f57c35633cb29834bb7577ba8052eab90f52a02',
+  18,
+  'DFNDR',
+  'Defender Bot',
+  false
+)
+export const DFNDR_WITH_TAX = new Token(
+  ChainId.MAINNET,
+  '0x3f57c35633cb29834bb7577ba8052eab90f52a02',
+  18,
+  'DFNDR',
+  'Defender Bot',
   false,
   BigNumber.from(500),
   BigNumber.from(500)
@@ -178,7 +197,7 @@ export function getTestAmount(currency: Currency): string {
 
 describe('quote', function () {
   // Help with test flakiness by retrying.
-  this.retries(0)
+  this.retries(3)
 
   this.timeout('500s')
 
@@ -1113,6 +1132,7 @@ describe('quote', function () {
               const tokenInAndTokenOut = [
                 [BULLET, WETH9[ChainId.MAINNET]!],
                 [WETH9[ChainId.MAINNET]!, BULLET],
+                [WETH9[ChainId.MAINNET]!, DFNDR],
               ]
 
               tokenInAndTokenOut.forEach(([tokenIn, tokenOut]) => {
@@ -1134,7 +1154,7 @@ describe('quote', function () {
                         await new Promise((f) => setTimeout(f, 1000))
                       }
                       const simulateFromAddress = tokenIn.equals(WETH9[ChainId.MAINNET]!)
-                        ? '0x2fEb1512183545f48f6b9C5b4EbfCaF49CfCa6F3'
+                        ? '0x6B44ba0a126a2A1a8aa6cD1AdeeD002e141Bcd44'
                         : '0x171d311eAcd2206d21Cb462d661C33F0eddadC03'
                       const quoteReq: QuoteQueryParams = {
                         tokenInAddress: tokenIn.address,
@@ -1155,9 +1175,12 @@ describe('quote', function () {
                         enableUniversalRouter: true,
                         // if fee-on-transfer flag is not enabled, most likely the simulation will fail due to quote not subtracting the tax
                         simulateFromAddress: enableFeeOnTransferFeeFetching ? simulateFromAddress : undefined,
+                        portionBips: FLAT_PORTION.bips,
+                        portionRecipient: FLAT_PORTION.recipient,
                       }
 
                       const queryParams = qs.stringify(quoteReq)
+                      console.log(`${API}?${queryParams}`)
 
                       const response: AxiosResponse<QuoteResponse> = await axios.get<QuoteResponse>(
                         `${API}?${queryParams}`
@@ -1169,6 +1192,18 @@ describe('quote', function () {
 
                   const quoteWithFlagOn = responses.find((r) => r.enableFeeOnTransferFeeFetching === true)
                   expect(quoteWithFlagOn).not.to.be.undefined
+
+                  // in case of FOT token that should not take a portion/fee, we assert that all portion fields are undefined
+                  if (!tokenOut?.equals(WETH9[ChainId.MAINNET])) {
+                    expect(quoteWithFlagOn!.data.portionAmount).to.be.undefined
+                    expect(quoteWithFlagOn!.data.portionBips).to.be.undefined
+                    expect(quoteWithFlagOn!.data.portionRecipient).to.be.undefined
+                  } else {
+                    expect(quoteWithFlagOn!.data.portionAmount).to.be.not.undefined
+                    expect(quoteWithFlagOn!.data.portionBips).to.be.not.undefined
+                    expect(quoteWithFlagOn!.data.portionRecipient).to.be.not.undefined
+                  }
+
                   responses
                     .filter((r) => r.enableFeeOnTransferFeeFetching !== true)
                     .forEach((r) => {
@@ -2364,6 +2399,29 @@ describe('quote', function () {
           })
         })
 
+        it(`tokens are the same after getting wrapped`, async () => {
+          const quoteReq: QuoteQueryParams = {
+            tokenInAddress: 'ETH',
+            tokenInChainId: 1,
+            tokenOutAddress: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',
+            tokenOutChainId: 1,
+            amount: await getAmount(1, type, 'ETH', 'WETH', '1'),
+            type,
+            recipient: alice.address,
+            slippageTolerance: SLIPPAGE,
+            deadline: '360',
+            algorithm,
+            enableUniversalRouter: true,
+          }
+          await callAndExpectFail(quoteReq, {
+            status: 400,
+            data: {
+              detail: 'tokenIn and tokenOut must be different',
+              errorCode: 'TOKEN_IN_OUT_SAME',
+            },
+          })
+        })
+
         it(`recipient is an invalid address`, async () => {
           const quoteReq: QuoteQueryParams = {
             tokenInAddress: 'USDT',
@@ -2424,14 +2482,11 @@ describe('quote', function () {
     [ChainId.GOERLI]: () => USDC_ON(ChainId.GOERLI),
     [ChainId.SEPOLIA]: () => USDC_ON(ChainId.SEPOLIA),
     [ChainId.OPTIMISM]: () => USDC_ON(ChainId.OPTIMISM),
-    [ChainId.OPTIMISM]: () => USDC_NATIVE_OPTIMISM,
     [ChainId.OPTIMISM_GOERLI]: () => USDC_ON(ChainId.OPTIMISM_GOERLI),
     [ChainId.OPTIMISM_SEPOLIA]: () => USDC_ON(ChainId.OPTIMISM_SEPOLIA),
     [ChainId.ARBITRUM_ONE]: () => USDC_ON(ChainId.ARBITRUM_ONE),
-    [ChainId.ARBITRUM_ONE]: () => USDC_NATIVE_ARBITRUM,
     [ChainId.ARBITRUM_SEPOLIA]: () => USDC_ON(ChainId.ARBITRUM_ONE),
     [ChainId.POLYGON]: () => USDC_ON(ChainId.POLYGON),
-    [ChainId.POLYGON]: () => USDC_NATIVE_POLYGON,
     [ChainId.POLYGON_MUMBAI]: () => USDC_ON(ChainId.POLYGON_MUMBAI),
     [ChainId.CELO]: () => CUSD_CELO,
     [ChainId.CELO_ALFAJORES]: () => CUSD_CELO_ALFAJORES,
@@ -2440,17 +2495,15 @@ describe('quote', function () {
     [ChainId.ARBITRUM_GOERLI]: () => null,
     [ChainId.BNB]: () => USDC_ON(ChainId.BNB),
     [ChainId.AVALANCHE]: () => USDC_ON(ChainId.AVALANCHE),
-    [ChainId.AVALANCHE]: () => USDC_NATIVE_AVAX,
     [ChainId.BASE_GOERLI]: () => USDC_ON(ChainId.BASE_GOERLI),
     [ChainId.BASE]: () => USDC_ON(ChainId.BASE),
-    [ChainId.BASE]: () => USDC_NATIVE_BASE,
-    [ChainId.BLAST]: () => null,
-    [ChainId.REDSTONE]: () => null,
-    [ChainId.ZORA]: () => null,
-    [ChainId.ZORA_SEPOLIA]: () => null,
+    [ChainId.ZORA]: () => USDC_ON(ChainId.ZORA),
+    [ChainId.ZORA_SEPOLIA]: () => USDC_ON(ChainId.ZORA_SEPOLIA),
+    [ChainId.ROOTSTOCK]: () => USDC_ON(ChainId.ROOTSTOCK),
+    [ChainId.BLAST]: () => USDB_BLAST,
+    [ChainId.ZKSYNC]: () => USDC_ON(ChainId.ZKSYNC),
     [ChainId.REDSTONE]: () => null,
     [ChainId.REDSTONE_GARNET]: () => null,
-    [ChainId.ROOTSTOCK]: () => null,
   }
 
   const TEST_ERC20_2: { [chainId in ChainId]: () => Token | null } = {
@@ -2473,13 +2526,13 @@ describe('quote', function () {
     [ChainId.AVALANCHE]: () => DAI_ON(ChainId.AVALANCHE),
     [ChainId.BASE_GOERLI]: () => WNATIVE_ON(ChainId.BASE_GOERLI),
     [ChainId.BASE]: () => WNATIVE_ON(ChainId.BASE),
-    [ChainId.BLAST]: () => null,
-    [ChainId.REDSTONE]: () => null,
-    [ChainId.ZORA]: () => null,
-    [ChainId.ZORA_SEPOLIA]: () => null,
+    [ChainId.ZORA]: () => WNATIVE_ON(ChainId.ZORA),
+    [ChainId.ZORA_SEPOLIA]: () => WNATIVE_ON(ChainId.ZORA_SEPOLIA),
+    [ChainId.ROOTSTOCK]: () => WNATIVE_ON(ChainId.ROOTSTOCK),
+    [ChainId.BLAST]: () => WNATIVE_ON(ChainId.BLAST),
+    [ChainId.ZKSYNC]: () => WNATIVE_ON(ChainId.ZKSYNC),
     [ChainId.REDSTONE]: () => null,
     [ChainId.REDSTONE_GARNET]: () => null,
-    [ChainId.ROOTSTOCK]: () => null,
   }
 
   // TODO: Find valid pools/tokens on optimistic kovan and polygon mumbai. We skip those tests for now.
@@ -2489,7 +2542,11 @@ describe('quote', function () {
       c != ChainId.OPTIMISM_SEPOLIA &&
       c != ChainId.POLYGON_MUMBAI &&
       c != ChainId.ARBITRUM_GOERLI &&
-      c != ChainId.CELO_ALFAJORES
+      c != ChainId.CELO_ALFAJORES &&
+      // We will follow up supporting ZORA and ROOTSTOCK
+      c != ChainId.ZORA_SEPOLIA &&
+      c != ChainId.ROOTSTOCK &&
+      c != ChainId.GOERLI
   )) {
     for (const type of TRADE_TYPES) {
       const erc1 = TEST_ERC20_1[chain]()
@@ -2504,12 +2561,15 @@ describe('quote', function () {
         const wrappedNative = WNATIVE_ON(chain)
 
         it(`${wrappedNative.symbol} -> erc20`, async () => {
+          // Current WETH/USDB pool (https://blastscan.io/address/0xf52b4b69123cbcf07798ae8265642793b2e8990c) has low WETH amount
+          const amount = type === 'exactOut' && chain === ChainId.BLAST ? '0.002' : '1'
+
           const quoteReq: QuoteQueryParams = {
             tokenInAddress: wrappedNative.address,
             tokenInChainId: chain,
             tokenOutAddress: erc1.address,
             tokenOutChainId: chain,
-            amount: await getAmountFromToken(type, wrappedNative, erc1, '1'),
+            amount: await getAmountFromToken(type, wrappedNative, erc1, amount),
             type,
             enableUniversalRouter: true,
           }
@@ -2564,12 +2624,15 @@ describe('quote', function () {
             return
           }
 
+          // Current WETH/USDB pool (https://blastscan.io/address/0xf52b4b69123cbcf07798ae8265642793b2e8990c) has low WETH amount
+          const amount = type === 'exactOut' && chain === ChainId.BLAST ? '0.002' : '1'
+
           const quoteReq: QuoteQueryParams = {
             tokenInAddress: erc1.address,
             tokenInChainId: chain,
             tokenOutAddress: erc2.address,
             tokenOutChainId: chain,
-            amount: await getAmountFromToken(type, erc1, erc2, '1'),
+            amount: await getAmountFromToken(type, erc1, erc2, amount),
             type,
           }
 
@@ -2589,6 +2652,13 @@ describe('quote', function () {
         it(`${native} -> erc20`, async () => {
           if (chain === ChainId.SEPOLIA) {
             // Sepolia doesn't have sufficient liquidity on DAI pools yet
+            return
+          }
+
+          if (chain === ChainId.BLAST || chain === ChainId.ZORA || chain === ChainId.ZKSYNC) {
+            // Blast doesn't have DAI or USDC yet
+            // Zora doesn't have DAI
+            // Zksync doesn't have liquid USDC/DAI pool yet
             return
           }
 
@@ -2622,12 +2692,15 @@ describe('quote', function () {
             return
           }
 
+          // Current WETH/USDB pool (https://blastscan.io/address/0xf52b4b69123cbcf07798ae8265642793b2e8990c) has low WETH amount
+          const amount = type === 'exactOut' && chain === ChainId.BLAST ? '0.002' : '1'
+
           const quoteReq: QuoteQueryParams = {
             tokenInAddress: erc1.address,
             tokenInChainId: chain,
             tokenOutAddress: erc2.address,
             tokenOutChainId: chain,
-            amount: await getAmountFromToken(type, erc1, erc2, '1'),
+            amount: await getAmountFromToken(type, erc1, erc2, amount),
             type,
           }
 

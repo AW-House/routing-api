@@ -8,6 +8,8 @@ import { SUPPORTED_CHAINS } from '../../lib/handlers/injector-sor'
 import { CachedRoutesWidgetsFactory } from '../../lib/dashboards/cached-routes-widgets-factory'
 import { ID_TO_NETWORK_NAME } from '@uniswap/smart-order-router/build/main/util/chains'
 import { RpcProvidersWidgetsFactory } from '../../lib/dashboards/rpc-providers-widgets-factory'
+import { REQUEST_SOURCES } from '../../lib/util/requestSources'
+import { TESTNETS } from '../../lib/util/testNets'
 
 export const NAMESPACE = 'Uniswap'
 
@@ -34,19 +36,7 @@ export class RoutingDashboardStack extends cdk.NestedStack {
     const { apiName, routingLambdaName, poolCacheLambdaNameArray, ipfsPoolCacheLambdaName } = props
     const region = cdk.Stack.of(this).region
 
-    const TESTNETS = [
-      ChainId.ARBITRUM_GOERLI,
-      ChainId.POLYGON_MUMBAI,
-      ChainId.GOERLI,
-      ChainId.SEPOLIA,
-      ChainId.CELO_ALFAJORES,
-      ChainId.BASE_GOERLI,
-      ChainId.REDSTONE_GARNET,
-    ]
-
     const MAINNETS = SUPPORTED_CHAINS.filter((chain) => !TESTNETS.includes(chain))
-
-    const REQUEST_SOURCES = ['unknown', 'uniswap-ios', 'uniswap-android', 'uniswap-web', 'external-api']
 
     // No CDK resource exists for contributor insights at the moment so use raw CloudFormation.
     const REQUESTED_QUOTES_RULE_NAME = 'RequestedQuotes'

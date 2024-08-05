@@ -1,19 +1,21 @@
 export interface CommonConfig {
+  // For an unhealthy provider, if it hasn't been used for some time, we can
+  // test it out to check its recovery. This defines the time it needs to wait
+  // before being tested again, in milliseconds.
+  HEALTH_EVALUATION_WAIT_PERIOD_IN_S: number
   // Wait time for recording next latency evaluation result.
   LATENCY_EVALUATION_WAIT_PERIOD_IN_S: number
 }
 
+// Config here applies to all chains.
 export interface UniJsonRpcProviderConfig extends CommonConfig {
-  // For an unhealthy provider, if it hasn't been used for some time, we can
-  // test it out to check its recovery. This defines the time it needs to wait
-  // before being tested again, in milliseconds.
-  RECOVER_EVALUATION_WAIT_PERIOD_IN_MS: number
   // Do shadow calls on other non-selected healthy providers to monitor their latencies
   ENABLE_SHADOW_LATENCY_EVALUATION: boolean
   // Default initial provider's weight, if not specified.
   DEFAULT_INITIAL_WEIGHT: 1000
 }
 
+// Config here applies to all chains.
 export interface SingleJsonRpcProviderConfig extends CommonConfig {
   ERROR_PENALTY: number
   HIGH_LATENCY_PENALTY: number
@@ -29,8 +31,6 @@ export interface SingleJsonRpcProviderConfig extends CommonConfig {
   // This is added to prevent an unhealthy provider gain too much recovery score only by
   // waiting a long time to be evaluated.
   RECOVER_MAX_WAIT_TIME_TO_ACKNOWLEDGE_IN_MS: number
-  // Flag to enable health state sync with DB.
-  ENABLE_DB_SYNC: boolean
   // Time interval to sync with health states from DB
   DB_SYNC_INTERVAL_IN_S: number
   // The length of latency history window to consider.
@@ -38,9 +38,9 @@ export interface SingleJsonRpcProviderConfig extends CommonConfig {
 }
 
 export const DEFAULT_UNI_PROVIDER_CONFIG: UniJsonRpcProviderConfig = {
-  RECOVER_EVALUATION_WAIT_PERIOD_IN_MS: 5000,
+  HEALTH_EVALUATION_WAIT_PERIOD_IN_S: 60,
   ENABLE_SHADOW_LATENCY_EVALUATION: true,
-  LATENCY_EVALUATION_WAIT_PERIOD_IN_S: 15,
+  LATENCY_EVALUATION_WAIT_PERIOD_IN_S: 60,
   DEFAULT_INITIAL_WEIGHT: 1000,
 }
 
@@ -56,10 +56,10 @@ export const DEFAULT_SINGLE_PROVIDER_CONFIG: SingleJsonRpcProviderConfig = {
   MAX_LATENCY_ALLOWED_IN_MS: 4000,
   RECOVER_SCORE_PER_MS: 0.01,
   RECOVER_MAX_WAIT_TIME_TO_ACKNOWLEDGE_IN_MS: 60000,
-  ENABLE_DB_SYNC: true,
-  DB_SYNC_INTERVAL_IN_S: 5,
-  LATENCY_STAT_HISTORY_WINDOW_LENGTH_IN_S: 300,
-  LATENCY_EVALUATION_WAIT_PERIOD_IN_S: 15,
+  DB_SYNC_INTERVAL_IN_S: 60,
+  LATENCY_STAT_HISTORY_WINDOW_LENGTH_IN_S: 180,
+  HEALTH_EVALUATION_WAIT_PERIOD_IN_S: 60,
+  LATENCY_EVALUATION_WAIT_PERIOD_IN_S: 60,
 }
 
 export enum ProviderSpecialWeight {

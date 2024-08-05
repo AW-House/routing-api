@@ -1,4 +1,10 @@
-import { SingleJsonRpcProvider } from './SingleJsonRpcProvider'
+import {
+  CALL_METHOD_NAME,
+  CallType,
+  MAJOR_METHOD_NAMES,
+  SEND_METHOD_NAME,
+  SingleJsonRpcProvider,
+} from './SingleJsonRpcProvider'
 import { StaticJsonRpcProvider, TransactionRequest } from '@ethersproject/providers'
 import { isEmpty } from 'lodash'
 import { ChainId } from '@uniswap/sdk-core'
@@ -14,7 +20,9 @@ import { LRUCache } from 'lru-cache'
 import { BigNumber, BigNumberish } from '@ethersproject/bignumber'
 import { Deferrable } from '@ethersproject/properties'
 import Logger from 'bunyan'
-import { DEFAULT_UNI_PROVIDER_CONFIG, UniJsonRpcProviderConfig } from './config'
+import { UniJsonRpcProviderConfig } from './config'
+import { EthFeeHistory } from '../util/eth_feeHistory'
+import { JsonRpcResponse } from 'hardhat/types'
 
 export class UniJsonRpcProvider extends StaticJsonRpcProvider {
   readonly chainId: ChainId = ChainId.MAINNET
@@ -25,23 +33,34 @@ export class UniJsonRpcProvider extends StaticJsonRpcProvider {
   // one of the healthy providers.
   // If not provided, we will only give non-zero weight to the first provider.
   private urlWeight: Record<string, number> = {}
-
   private lastUsedProvider: SingleJsonRpcProvider | null = null
-
   private sessionCache: LRUCache<string, SingleJsonRpcProvider> = new LRUCache({ max: 1000 })
+
+  private latencyEvaluationSampleProb: number
+  private healthCheckSampleProb: number
 
   // If true, it's allowed to use a different provider if the preferred provider isn't healthy.
   private readonly sessionAllowProviderFallbackWhenUnhealthy: boolean = true
-
   private config: UniJsonRpcProviderConfig
 
   private readonly log: Logger
+
+  // Force attach a session id to this instance.
+  // For later RPC calls, we will treat this as the session id, even if the RPC call itself doesn't specify one.
+  attachedSessionId: string | null = null
+
+  // A hacky public mutable field to ensure all the shadow calls for provider health evaluation
+  // can only be invoked during the request processing path, but not during lambda initialization time
+  public shouldEvaluate: boolean = true
 
   /**
    *
    * @param chainId
    * @param singleRpcProviders
    * @param log
+   * @param config
+   * @param latencyEvaluationSampleProb
+   * @param healthCheckSampleProb
    * @param weights
    *  Positive value represents provider weight when selecting from different healthy providers.
    *  It's usually a positive integer value.
@@ -50,20 +69,23 @@ export class UniJsonRpcProvider extends StaticJsonRpcProvider {
    *    AS_FALLBACK(-1) means this provider will only be able to be selected when no healthy provider has positive weights. In that case, the first healthy provider with -1 will be selected.
    *  Not providing this argument means using -1 for all weight values.
    * @param sessionAllowProviderFallbackWhenUnhealthy
-   * @param config
    */
   constructor(
     chainId: ChainId,
     singleRpcProviders: SingleJsonRpcProvider[],
     log: Logger,
+    config: UniJsonRpcProviderConfig,
+    latencyEvaluationSampleProb: number,
+    healthCheckSampleProb: number,
     weights?: number[],
-    sessionAllowProviderFallbackWhenUnhealthy?: boolean,
-    config: UniJsonRpcProviderConfig = DEFAULT_UNI_PROVIDER_CONFIG
+    sessionAllowProviderFallbackWhenUnhealthy?: boolean
   ) {
     // Dummy super constructor call is needed.
     super('dummy_url', { chainId, name: 'dummy_network' })
     this.log = log
     this.config = config
+    this.latencyEvaluationSampleProb = latencyEvaluationSampleProb
+    this.healthCheckSampleProb = healthCheckSampleProb
 
     if (isEmpty(singleRpcProviders)) {
       throw new Error('Empty singlePrcProviders')
@@ -129,17 +151,18 @@ export class UniJsonRpcProvider extends StaticJsonRpcProvider {
   private selectPreferredProvider(sessionId?: string): SingleJsonRpcProvider {
     // If session is used, stick to the last provider, if possible.
     if (sessionId !== undefined && this.sessionCache.has(sessionId)) {
-      const provider = this.sessionCache.get(sessionId)!
-      if (provider.isHealthy()) {
-        return provider
+      const selectedProvider = this.sessionCache.get(sessionId)!
+      if (selectedProvider.isHealthy()) {
+        this.log.debug(`Use provider ${selectedProvider.url} for chain ${this.chainId.toString()}`)
+        return selectedProvider
       } else if (!this.sessionAllowProviderFallbackWhenUnhealthy) {
         throw new Error(
-          `Forced to use the same provider during the session but the provider (${provider.providerName}) is unhealthy`
+          `Forced to use the same provider during the session but the provider (${selectedProvider.providerName}) is unhealthy`
         )
       }
     }
 
-    this.logProviderHealthScores()
+    this.logProviderHealthiness()
 
     const healthyProviders = this.providers.filter((provider) => provider.isHealthy())
     if (isEmpty(healthyProviders)) {
@@ -169,18 +192,24 @@ export class UniJsonRpcProvider extends StaticJsonRpcProvider {
   }
 
   // Shadow call to all unhealthy providers to get some idea about their latest health state.
-  // We will rate limit it to one request per config.RECOVER_EVALUATION_WAIT_PERIOD_IN_MS per lambda instance.
-  private checkUnhealthyProviders() {
+  private checkUnhealthyProviders(selectedProvider: SingleJsonRpcProvider) {
     this.log.debug('After serving a call, check unhealthy providers')
+    const unhealthyProviders = this.providers.filter((provider) => !provider.isHealthy())
     let count = 0
-    for (const provider of this.providers) {
+    for (const provider of unhealthyProviders) {
+      if (provider.url === selectedProvider.url) {
+        continue
+      }
+      if (Math.random() >= this.healthCheckSampleProb) {
+        continue
+      }
       if (
-        !provider.isHealthy() &&
-        provider.hasEnoughWaitSinceLastCall(this.config.RECOVER_EVALUATION_WAIT_PERIOD_IN_MS)
+        !provider.isEvaluatingHealthiness() &&
+        provider.hasEnoughWaitSinceLastHealthinessEvaluation(1000 * this.config.HEALTH_EVALUATION_WAIT_PERIOD_IN_S)
       ) {
         // Fire and forget. Don't care about its result and it won't throw.
         // It's done this way because We don't want to block the return of this function.
-        provider.evaluateForRecovery()
+        provider.evaluateHealthiness()
         count++
       }
     }
@@ -189,30 +218,162 @@ export class UniJsonRpcProvider extends StaticJsonRpcProvider {
 
   // Shadow call to other health providers that are not selected for performing current request
   // to gather their health states from time to time.
-  private checkOtherHealthyProvider(selectedProvider: SingleJsonRpcProvider, methodName: string, args: any[]) {
+  private async checkOtherHealthyProvider(
+    latency: number,
+    selectedProvider: SingleJsonRpcProvider,
+    methodName: string,
+    args: any[],
+    providerResponse: any
+  ): Promise<void> {
     const healthyProviders = this.providers.filter((provider) => provider.isHealthy())
     let count = 0
-    for (let provider of healthyProviders) {
-      if (provider.url != selectedProvider.url) {
-        if (provider.hasEnoughWaitSinceLastLatencyEvaluation(1000 * this.config.LATENCY_EVALUATION_WAIT_PERIOD_IN_S)) {
-          // Fire and forget. Don't care about its result and it won't throw.
-          // It's done this way because We don't want to block the return of this function.
-          provider.evaluateLatency(methodName, args)
-          count++
+    await Promise.all(
+      healthyProviders.map(async (provider) => {
+        if (provider.url === selectedProvider.url) {
+          return
         }
-      }
+        if (!MAJOR_METHOD_NAMES.includes(methodName)) {
+          return
+        }
+
+        // Within each provider latency shadow evaluation, we should do block I/O,
+        // because NodeJS runs in single thread, so it's important to make sure
+        // we benchmark the latencies correctly based on the single-threaded sequential evaluation.
+        const evaluatedProviderResponse = await provider[`evaluateLatency`](methodName, ...args)
+        // below invocation does not make the call/send RPC return the correct data
+        // both call and send will return "0x" for some reason
+        // I have to change to above invocation to make call/send return geniun RPC response
+        // const evaluatedProviderResponse = await provider.evaluateLatency(methodName, args)
+        this.compareRpcResponses(
+          providerResponse,
+          evaluatedProviderResponse,
+          selectedProvider,
+          provider,
+          methodName,
+          args
+        )
+
+        count++
+      })
+    )
+
+    if (count > 0) {
+      selectedProvider.logLatencyMetrics(methodName, latency, CallType.LATENCY_EVALUATION)
     }
+
     this.log.debug(`Evaluated ${count} other healthy providers`)
   }
 
-  logProviderHealthScores() {
+  compareRpcResponses(
+    providerResponse: any,
+    evaluatedProviderResponse: any,
+    selectedProvider: SingleJsonRpcProvider,
+    otherProvider: SingleJsonRpcProvider,
+    methodName: string,
+    args: any[]
+  ) {
+    switch (methodName) {
+      case CALL_METHOD_NAME:
+        // if it's eth_call, then we know the response data type is string, so we can compare directly
+        if (providerResponse !== evaluatedProviderResponse) {
+          // create a bogus error object to get the call stack
+          const error = new Error()
+          this.log.error(
+            { methodName, args },
+            `Provider response mismatch: ${providerResponse} from ${selectedProvider.providerId} vs ${evaluatedProviderResponse} from ${otherProvider.providerId}. Call stack ${error.stack}`
+          )
+          selectedProvider.logRpcResponseMismatch(methodName, otherProvider)
+        } else {
+          selectedProvider.logRpcResponseMatch(methodName, otherProvider)
+        }
+        break
+      case SEND_METHOD_NAME:
+        // send is complicated, because it could be eth_call, eth_blockNumber, eth_feeHistory, eth_estimateGas
+        // so we need to compare the response based on the method name
+        const underlyingMethodName = args[0]
+        const stitchedMethodName = `${SEND_METHOD_NAME}_${underlyingMethodName}`
+        const castedProviderResponse = providerResponse as JsonRpcResponse
+        const castedEvaluatedProviderResponse = evaluatedProviderResponse as JsonRpcResponse
+        switch (underlyingMethodName) {
+          // eth_call result type is string, so we can compare directly
+          case 'eth_call':
+          // eth_estimateGas result type is number, so we can compare directly without casting to number type
+          case 'eth_estimateGas':
+            if (castedProviderResponse.result !== castedEvaluatedProviderResponse.result) {
+              this.log.error(
+                { stitchedMethodName, args },
+                `Provider result mismatch: ${castedProviderResponse.result} from ${selectedProvider.providerId} vs ${castedEvaluatedProviderResponse.result} from ${otherProvider.providerId}`
+              )
+              selectedProvider.logRpcResponseMismatch(stitchedMethodName, otherProvider)
+            } else if (castedProviderResponse.error?.data !== castedEvaluatedProviderResponse.error?.data) {
+              // when comparing the error, the most important part is the data field
+              this.log.error(
+                { stitchedMethodName, args },
+                `Provider error mismatch: ${JSON.stringify(castedProviderResponse.error)} from ${
+                  selectedProvider.providerId
+                } vs ${JSON.stringify(castedEvaluatedProviderResponse.error)} from ${otherProvider.providerId}`
+              )
+              selectedProvider.logRpcResponseMismatch(stitchedMethodName, otherProvider)
+            } else {
+              selectedProvider.logRpcResponseMatch(stitchedMethodName, otherProvider)
+            }
+            break
+          case 'eth_feeHistory':
+            if (castedProviderResponse.result && castedEvaluatedProviderResponse.result) {
+              const ethFeeHistory = castedProviderResponse.result as EthFeeHistory
+              const evaluatedEthFeeHistory = castedEvaluatedProviderResponse.result as EthFeeHistory
+
+              const mismatch =
+                ethFeeHistory.oldestBlock !== evaluatedEthFeeHistory.oldestBlock ||
+                JSON.stringify(ethFeeHistory.reward) !== JSON.stringify(evaluatedEthFeeHistory.reward) ||
+                JSON.stringify(ethFeeHistory.baseFeePerGas) !== JSON.stringify(evaluatedEthFeeHistory.baseFeePerGas) ||
+                JSON.stringify(ethFeeHistory.gasUsedRatio) !== JSON.stringify(evaluatedEthFeeHistory.gasUsedRatio) ||
+                JSON.stringify(ethFeeHistory.baseFeePerBlobGas) !==
+                  JSON.stringify(evaluatedEthFeeHistory.baseFeePerBlobGas) ||
+                JSON.stringify(ethFeeHistory.blobGasUsedRatio) !==
+                  JSON.stringify(evaluatedEthFeeHistory.blobGasUsedRatio)
+              if (mismatch) {
+                this.log.error(
+                  { stitchedMethodName, args },
+                  `Provider result mismatch: ${JSON.stringify(ethFeeHistory)} from ${
+                    selectedProvider.providerId
+                  } vs ${JSON.stringify(evaluatedEthFeeHistory)} from ${otherProvider.providerId}`
+                )
+                selectedProvider.logRpcResponseMismatch(stitchedMethodName, otherProvider)
+              } else {
+                selectedProvider.logRpcResponseMatch(stitchedMethodName, otherProvider)
+              }
+            } else if (castedProviderResponse.error?.data !== castedEvaluatedProviderResponse.error?.data) {
+              // when comparing the error, the most important part is the data field
+              this.log.error(
+                { stitchedMethodName, args },
+                `Provider error mismatch: ${JSON.stringify(castedProviderResponse.error)} from ${
+                  selectedProvider.providerId
+                } vs ${JSON.stringify(castedEvaluatedProviderResponse.error)} from ${otherProvider.providerId}`
+              )
+              selectedProvider.logRpcResponseMismatch(stitchedMethodName, otherProvider)
+            }
+
+            break
+          default:
+            // if it's get block number, there's no guarantee that two providers will return the same block number
+            // since the node might be syncing, so we don't need to compare the response
+            return
+        }
+        break
+      default:
+        // if it's get block number, there's no guarantee that two providers will return the same block number
+        // since the node might be syncing, so we don't need to compare the response
+        return
+    }
+  }
+
+  logProviderHealthiness() {
     for (const provider of this.providers.filter((provider) => provider.isHealthy())) {
-      this.log.debug(`Healthy provider, url: ${provider.url}, score: ${provider['healthScore']}`)
-      provider.logHealthMetrics()
+      this.log.debug(`Healthy provider: ${provider.url}`)
     }
     for (const provider of this.providers.filter((provider) => !provider.isHealthy())) {
-      this.log.debug(`Unhealthy provider, url: ${provider.url}, score: ${provider['healthScore']}`)
-      provider.logHealthMetrics()
+      this.log.debug(`Unhealthy provider: ${provider.url}`)
     }
   }
 
@@ -236,22 +397,51 @@ export class UniJsonRpcProvider extends StaticJsonRpcProvider {
     return sessionId
   }
 
+  forceAttachToNewSession() {
+    this.attachedSessionId = this.createNewSessionId()
+  }
+
   private async wrappedFunctionCall(fnName: string, sessionId?: string, ...args: any[]): Promise<any> {
+    if (this.attachedSessionId !== null) {
+      this.log.debug(
+        `UniJsonRpcProvider for chain ${this.chainId} currently attached to session id ${this.attachedSessionId}`
+      )
+      sessionId = this.attachedSessionId
+    }
+
     this.log.debug(
       `UniJsonRpcProvider: wrappedFunctionCall: fnName: ${fnName}, sessionId: ${sessionId}, args: ${[...args]}`
     )
     const selectedProvider = this.selectPreferredProvider(sessionId)
+    selectedProvider.logProviderSelection()
+    let latency = 0
+    let result
     try {
-      return await (selectedProvider as any)[`${fnName}`](...args)
+      const start = Date.now()
+      result = await (selectedProvider as any)[`${fnName}`](...args)
+      latency = Date.now() - start
+      return result
     } catch (error: any) {
-      this.log.error(JSON.stringify(error))
+      this.log.error({ error }, JSON.stringify(error))
       throw error
     } finally {
       this.lastUsedProvider = selectedProvider
-      if (this.config.ENABLE_SHADOW_LATENCY_EVALUATION) {
-        this.checkOtherHealthyProvider(selectedProvider, fnName, args)
+      if (this.shouldEvaluate) {
+        // We only want to probabilistically evaluate latency of other healthy providers,
+        // when there's session id populated. Session id being populated means it's from the request processing path.
+        if (
+          this.config.ENABLE_SHADOW_LATENCY_EVALUATION &&
+          Math.random() < this.latencyEvaluationSampleProb &&
+          sessionId
+        ) {
+          // fire and forget to evaluate latency of other healthy providers
+          this.checkOtherHealthyProvider(latency, selectedProvider, fnName, args, result)
+        }
+
+        if (Math.random() < this.healthCheckSampleProb && sessionId) {
+          this.checkUnhealthyProviders(selectedProvider)
+        }
       }
-      this.checkUnhealthyProviders()
     }
   }
 

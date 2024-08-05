@@ -25,13 +25,16 @@ import {
   QUOTE_SPEED_CONFIG,
 } from '../shared'
 import { QuoteQueryParams, QuoteQueryParamsJoi, TradeTypeParam } from './schema/quote-schema'
-import { simulationStatusToString } from './util/simulation'
+import { simulationStatusTranslation } from './util/simulation'
 import Logger from 'bunyan'
 import { PAIRS_TO_TRACK } from './util/pairs-to-track'
 import { measureDistributionPercentChangeImpact } from '../../util/alpha-config-measurement'
 import { MetricsLogger } from 'aws-embedded-metrics'
 import { CurrencyLookup } from '../CurrencyLookup'
 import { SwapOptionsFactory } from './SwapOptionsFactory'
+import { GlobalRpcProviders } from '../../rpc/GlobalRpcProviders'
+import { adhocCorrectGasUsed } from '../../util/estimateGasUsed'
+import { adhocCorrectGasUsedUSD } from '../../util/estimateGasUsedUSD'
 
 export class QuoteHandler extends APIGLambdaHandler<
   ContainerInjected,
@@ -55,14 +58,31 @@ export class QuoteHandler extends APIGLambdaHandler<
     const startTime = Date.now()
 
     let result: Response<QuoteResponse> | ErrorResponse
+    const useRpcGateway = GlobalRpcProviders.getGlobalUniRpcProviders(log).has(chainId)
 
     try {
+      if (useRpcGateway) {
+        const provider = GlobalRpcProviders.getGlobalUniRpcProviders(log).get(chainId)!
+        provider.forceAttachToNewSession()
+        provider.shouldEvaluate = true
+      }
+
       result = await this.handleRequestInternal(params, startTime)
 
       switch (result.statusCode) {
         case 200:
         case 202:
           metric.putMetric(`GET_QUOTE_200_CHAINID: ${chainId}`, 1, MetricLoggerUnit.Count)
+          metric.putMetric(
+            `GET_QUOTE_200_REQUEST_SOURCE: ${params.requestQueryParams.source}`,
+            1,
+            MetricLoggerUnit.Count
+          )
+          metric.putMetric(
+            `GET_QUOTE_200_REQUEST_SOURCE_AND_CHAINID: ${params.requestQueryParams.source} ${chainId}`,
+            1,
+            MetricLoggerUnit.Count
+          )
           break
         case 400:
         case 403:
@@ -70,6 +90,16 @@ export class QuoteHandler extends APIGLambdaHandler<
         case 408:
         case 409:
           metric.putMetric(`GET_QUOTE_400_CHAINID: ${chainId}`, 1, MetricLoggerUnit.Count)
+          metric.putMetric(
+            `GET_QUOTE_400_REQUEST_SOURCE: ${params.requestQueryParams.source}`,
+            1,
+            MetricLoggerUnit.Count
+          )
+          metric.putMetric(
+            `GET_QUOTE_400_REQUEST_SOURCE_AND_CHAINID: ${params.requestQueryParams.source} ${chainId}`,
+            1,
+            MetricLoggerUnit.Count
+          )
           log.error(
             {
               statusCode: result?.statusCode,
@@ -83,17 +113,55 @@ export class QuoteHandler extends APIGLambdaHandler<
           break
         case 500:
           metric.putMetric(`GET_QUOTE_500_CHAINID: ${chainId}`, 1, MetricLoggerUnit.Count)
+          if (useRpcGateway) {
+            metric.putMetric(`RPC_GATEWAY_GET_QUOTE_500_CHAINID: ${chainId}`, 1, MetricLoggerUnit.Count)
+          }
+          metric.putMetric(
+            `GET_QUOTE_500_REQUEST_SOURCE: ${params.requestQueryParams.source}`,
+            1,
+            MetricLoggerUnit.Count
+          )
+          metric.putMetric(
+            `GET_QUOTE_500_REQUEST_SOURCE_AND_CHAINID: ${params.requestQueryParams.source} ${chainId}`,
+            1,
+            MetricLoggerUnit.Count
+          )
           break
       }
     } catch (err) {
       metric.putMetric(`GET_QUOTE_500_CHAINID: ${chainId}`, 1, MetricLoggerUnit.Count)
+      if (useRpcGateway) {
+        metric.putMetric(`RPC_GATEWAY_GET_QUOTE_500_CHAINID: ${chainId}`, 1, MetricLoggerUnit.Count)
+      }
+      metric.putMetric(`GET_QUOTE_500_REQUEST_SOURCE: ${params.requestQueryParams.source}`, 1, MetricLoggerUnit.Count)
+      metric.putMetric(
+        `GET_QUOTE_500_REQUEST_SOURCE_AND_CHAINID: ${params.requestQueryParams.source} ${chainId}`,
+        1,
+        MetricLoggerUnit.Count
+      )
 
       throw err
     } finally {
       // This metric is logged after calling the internal handler to correlate with the status metrics
       metric.putMetric(`GET_QUOTE_REQUEST_SOURCE: ${params.requestQueryParams.source}`, 1, MetricLoggerUnit.Count)
       metric.putMetric(`GET_QUOTE_REQUESTED_CHAINID: ${chainId}`, 1, MetricLoggerUnit.Count)
+      if (useRpcGateway) {
+        metric.putMetric(`RPC_GATEWAY_GET_QUOTE_REQUESTED_CHAINID: ${chainId}`, 1, MetricLoggerUnit.Count)
+      }
+      metric.putMetric(
+        `GET_QUOTE_REQUEST_SOURCE_AND_CHAINID: ${params.requestQueryParams.source} ${chainId}`,
+        1,
+        MetricLoggerUnit.Count
+      )
+
       metric.putMetric(`GET_QUOTE_LATENCY_CHAIN_${chainId}`, Date.now() - startTime, MetricLoggerUnit.Milliseconds)
+      if (useRpcGateway) {
+        metric.putMetric(
+          `RPC_GATEWAY_GET_QUOTE_LATENCY_CHAIN_${chainId}`,
+          Date.now() - startTime,
+          MetricLoggerUnit.Milliseconds
+        )
+      }
 
       metric.putMetric(
         `GET_QUOTE_LATENCY_CHAIN_${chainId}_QUOTE_SPEED_${quoteSpeed ?? 'standard'}`,
@@ -166,39 +234,26 @@ export class QuoteHandler extends APIGLambdaHandler<
       }
     }
 
-    let protocols: Protocol[] = []
-    if (protocolsStr) {
-      for (const protocolStr of protocolsStr) {
-        switch (protocolStr.toLowerCase()) {
-          case 'v2':
-            if (
-              chainId === ChainId.MAINNET ||
-              !['uniswap-ios', 'uniswap-android'].includes(params.requestQueryParams.source ?? '')
-            ) {
-              protocols.push(Protocol.V2)
-            }
-            break
-          case 'v3':
-            protocols.push(Protocol.V3)
-            break
-          case 'mixed':
-            if (
-              chainId === ChainId.MAINNET ||
-              !['uniswap-ios', 'uniswap-android'].includes(params.requestQueryParams.source ?? '')
-            ) {
-              protocols.push(Protocol.MIXED)
-            }
-            break
-          default:
-            return {
-              statusCode: 400,
-              errorCode: 'INVALID_PROTOCOL',
-              detail: `Invalid protocol specified. Supported protocols: ${JSON.stringify(Object.values(Protocol))}`,
-            }
-        }
+    const requestSourceHeader = params.event.headers && params.event.headers['x-request-source']
+    const appVersion = params.event.headers && params.event.headers['x-app-version']
+
+    if (requestSourceHeader) {
+      metric.putMetric(`RequestSource.${requestSourceHeader}`, 1)
+    }
+
+    if (appVersion) {
+      metric.putMetric(`AppVersion.${appVersion}`, 1)
+    }
+
+    const requestSource = requestSourceHeader ?? params.requestQueryParams.source ?? ''
+    const protocols = QuoteHandler.protocolsFromRequest(chainId, protocolsStr, forceCrossProtocol)
+
+    if (protocols === undefined) {
+      return {
+        statusCode: 400,
+        errorCode: 'INVALID_PROTOCOL',
+        detail: `Invalid protocol specified. Supported protocols: ${JSON.stringify(Object.values(Protocol))}`,
       }
-    } else if (!forceCrossProtocol) {
-      protocols = [Protocol.V3]
     }
 
     // Parse user provided token address/symbol to Currency object.
@@ -227,7 +282,8 @@ export class QuoteHandler extends APIGLambdaHandler<
       }
     }
 
-    if (currencyIn.equals(currencyOut)) {
+    // We need bo wrap both tokens, because the comparison includes comparing native currency vs token.
+    if (currencyIn.wrapped.equals(currencyOut.wrapped)) {
       return {
         statusCode: 400,
         errorCode: 'TOKEN_IN_OUT_SAME',
@@ -380,9 +436,9 @@ export class QuoteHandler extends APIGLambdaHandler<
       quoteGasAdjusted,
       quoteGasAndPortionAdjusted,
       route,
-      estimatedGasUsed,
+      estimatedGasUsed: preProcessedEstimatedGasUsed,
       estimatedGasUsedQuoteToken,
-      estimatedGasUsedUSD,
+      estimatedGasUsedUSD: preProcessedEstimatedGasUsedUSD,
       estimatedGasUsedGasToken,
       gasPriceWei,
       methodParameters,
@@ -391,6 +447,14 @@ export class QuoteHandler extends APIGLambdaHandler<
       hitsCachedRoute,
       portionAmount: outputPortionAmount, // TODO: name it back to portionAmount
     } = swapRoute
+
+    const estimatedGasUsed = adhocCorrectGasUsed(preProcessedEstimatedGasUsed, chainId, requestSource)
+    const estimatedGasUsedUSD = adhocCorrectGasUsedUSD(
+      preProcessedEstimatedGasUsed,
+      preProcessedEstimatedGasUsedUSD,
+      chainId,
+      requestSource
+    )
 
     if (simulationStatus == SimulationStatus.Failed) {
       metric.putMetric('SimulationFailed', 1, MetricLoggerUnit.Count)
@@ -542,15 +606,15 @@ export class QuoteHandler extends APIGLambdaHandler<
       gasUseEstimateGasTokenDecimals: estimatedGasUsedGasToken?.toExact(),
       gasUseEstimate: estimatedGasUsed.toString(),
       gasUseEstimateUSD: estimatedGasUsedUSD.toExact(),
-      simulationStatus: simulationStatusToString(simulationStatus, log),
+      simulationStatus: simulationStatusTranslation(simulationStatus, log),
       simulationError: simulationStatus == SimulationStatus.Failed,
       gasPriceWei: gasPriceWei.toString(),
       route: routeResponse,
       routeString,
       quoteId,
       hitsCachedRoutes: hitsCachedRoute,
-      portionBips: portionBips,
-      portionRecipient: portionRecipient,
+      portionBips: outputPortionAmount && portionBips,
+      portionRecipient: outputPortionAmount && portionRecipient,
       portionAmount: outputPortionAmount?.quotient.toString(),
       portionAmountDecimals: outputPortionAmount?.toExact(),
     }
@@ -573,6 +637,44 @@ export class QuoteHandler extends APIGLambdaHandler<
     return {
       statusCode: 200,
       body: result,
+    }
+  }
+
+  static protocolsFromRequest(
+    chainId: ChainId,
+    requestedProtocols: string[] | string | undefined,
+    forceCrossProtocol: boolean | undefined
+  ): Protocol[] | undefined {
+    const excludeV2 = false
+
+    if (requestedProtocols) {
+      let protocols: Protocol[] = []
+
+      for (const protocolStr of requestedProtocols) {
+        switch (protocolStr.toUpperCase()) {
+          case Protocol.V2:
+            if (chainId === ChainId.MAINNET || !excludeV2) {
+              protocols.push(Protocol.V2)
+            }
+            break
+          case Protocol.V3:
+            protocols.push(Protocol.V3)
+            break
+          case Protocol.MIXED:
+            if (chainId === ChainId.MAINNET || !excludeV2) {
+              protocols.push(Protocol.MIXED)
+            }
+            break
+          default:
+            return undefined
+        }
+      }
+
+      return protocols
+    } else if (!forceCrossProtocol) {
+      return [Protocol.V3]
+    } else {
+      return []
     }
   }
 

@@ -9,7 +9,7 @@ import {
   UniJsonRpcProviderConfig,
 } from './config'
 import { ProdConfig, ProdConfigJoi } from './ProdConfig'
-import { chainIdToNetworkName } from './utils'
+import { chainIdToNetworkName, generateProviderUrl } from './utils'
 import PROD_CONFIG from '../config/rpcProviderProdConfig.json'
 
 const RPC_PLACEHOLDER = 'https://rpc.payload.de'
@@ -39,7 +39,7 @@ export class GlobalRpcProviders {
           chainConfig.providerUrls[i] = RPC_PLACEHOLDER
           continue
         }
-        chainConfig.providerUrls[i] = process.env[urlEnvVar]!
+        chainConfig.providerUrls[i] = generateProviderUrl(urlEnvVar, process.env[urlEnvVar]!)
       }
     }
     return prodConfig
@@ -57,7 +57,14 @@ export class GlobalRpcProviders {
         let providers: SingleJsonRpcProvider[] = []
         for (const providerUrl of chainConfig.providerUrls!) {
           providers.push(
-            new SingleJsonRpcProvider({ name: chainIdToNetworkName(chainId), chainId }, providerUrl, log, singleConfig)
+            new SingleJsonRpcProvider(
+              { name: chainIdToNetworkName(chainId), chainId },
+              providerUrl,
+              log,
+              singleConfig,
+              chainConfig.enableDbSync!,
+              chainConfig.dbSyncSampleProb!
+            )
           )
         }
         GlobalRpcProviders.SINGLE_RPC_PROVIDERS.set(chainId, providers)
@@ -87,9 +94,11 @@ export class GlobalRpcProviders {
           chainId,
           GlobalRpcProviders.SINGLE_RPC_PROVIDERS!.get(chainId)!,
           log,
+          uniConfig,
+          chainConfig.latencyEvaluationSampleProb!,
+          chainConfig.healthCheckSampleProb!,
           chainConfig.providerInitialWeights,
-          true,
-          uniConfig
+          true
         )
       )
     }
